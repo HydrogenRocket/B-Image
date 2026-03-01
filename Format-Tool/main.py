@@ -57,125 +57,135 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("640x800")  # vertical stacking
-        # theme toggle will be placed near status bar instead of a menu
-        # no menu bar needed
+        self.geometry("640x800")
 
-        # make panels expand vertically
+        # Top frame gets 1 share, bottom frame gets 2 shares (more content)
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure((0, 1), weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=2)
 
-        # Left frame: Image -> .bimg
+        # ── Top frame: Image -> .bimg ──────────────────────────────────────
         left = ctk.CTkFrame(self, corner_radius=6)
-        left.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
-        left.grid_columnconfigure((0,1,2), weight=1)
-        for r in range(8):
-            left.grid_rowconfigure(r, weight=0)
-        left.grid_rowconfigure(6, weight=1)  # spacer pushes button to bottom
+        left.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="nsew")
 
-        ctk.CTkLabel(left, text="Image -> .bimg", font=TITLE_FONT).grid(row=0, column=0, columnspan=3, pady=(4, 4))
+        # Button packed at bottom FIRST — pack reserves its space before anything else,
+        # so it is always visible and flush with the frame border.
+        ctk.CTkButton(
+            left, text="Create .bimg", fg_color="#1f6feb", font=FONT,
+            command=self.create_bimg_thread,
+        ).pack(side="bottom", fill="x", padx=16, pady=(8, 16))
 
-        self.src_entry = ctk.CTkEntry(left, placeholder_text="Select source image...", font=FONT)
+        # Content area fills all remaining space above the button
+        lc = ctk.CTkFrame(left, fg_color="transparent")
+        lc.pack(side="top", fill="both", expand=True)
+        lc.grid_columnconfigure((0, 1, 2), weight=1)
+
+        ctk.CTkLabel(lc, text="Image -> .bimg", font=TITLE_FONT).grid(
+            row=0, column=0, columnspan=3, pady=(8, 4))
+
+        self.src_entry = ctk.CTkEntry(lc, placeholder_text="Select source image...", font=FONT)
         self.src_entry.grid(row=1, column=0, columnspan=2, padx=8, pady=6, sticky="ew")
-        ctk.CTkButton(left, text="Browse", font=FONT, command=self.browse_image).grid(row=1, column=2, padx=4, pady=4)
+        ctk.CTkButton(lc, text="Browse", font=FONT, command=self.browse_image).grid(
+            row=1, column=2, padx=4, pady=4)
 
-        self.out_entry = ctk.CTkEntry(left, placeholder_text="Output filename (optional)", font=FONT)
+        self.out_entry = ctk.CTkEntry(lc, placeholder_text="Output filename (optional)", font=FONT)
         self.out_entry.grid(row=2, column=0, columnspan=2, padx=8, pady=6, sticky="ew")
-        ctk.CTkLabel(left, text=".bimg will be appended if missing").grid(row=2, column=2, padx=8, pady=6)
+        ctk.CTkLabel(lc, text=".bimg will be appended if missing").grid(
+            row=2, column=2, padx=8, pady=6)
 
         self.alpha_var = ctk.BooleanVar()
-        ctk.CTkCheckBox(left, text="Preserve alpha", variable=self.alpha_var, font=FONT).grid(row=3, column=0, padx=4, pady=4)
+        ctk.CTkCheckBox(lc, text="Preserve alpha", variable=self.alpha_var, font=FONT).grid(
+            row=3, column=0, padx=4, pady=4)
 
         self.flatten_var = ctk.BooleanVar()
-        ctk.CTkCheckBox(left, text="Flatten pixels list", variable=self.flatten_var, font=FONT).grid(row=3, column=1, padx=4, pady=4)
+        ctk.CTkCheckBox(lc, text="Flatten pixels list", variable=self.flatten_var, font=FONT).grid(
+            row=3, column=1, padx=4, pady=4)
 
-        # Cluster threshold slider (K-means compression)
-        ctk.CTkLabel(left, text="Compression:", font=FONT).grid(row=4, column=0, padx=4, pady=(8, 2), sticky="w")
+        ctk.CTkLabel(lc, text="Compression:", font=FONT).grid(
+            row=4, column=0, padx=4, pady=(8, 2), sticky="w")
         self.cluster_var = ctk.DoubleVar(value=0)
-        self.cluster_slider = ctk.CTkSlider(left, from_=0, to=255, number_of_steps=256, variable=self.cluster_var)
+        self.cluster_slider = ctk.CTkSlider(
+            lc, from_=0, to=255, number_of_steps=256, variable=self.cluster_var)
         self.cluster_slider.grid(row=4, column=1, columnspan=2, padx=4, pady=(8, 2), sticky="ew")
-        
-        # Label to show current threshold value
-        self.threshold_label = ctk.CTkLabel(left, text="0 (Lossless)", font=("Arial", 10))
+
+        self.threshold_label = ctk.CTkLabel(lc, text="0 (Lossless)", font=("Arial", 10))
         self.threshold_label.grid(row=5, column=0, columnspan=3, padx=4, pady=(0, 4))
         self.cluster_slider.bind("<B1-Motion>", self.update_threshold_label)
         self.cluster_slider.bind("<Button-1>", self.update_threshold_label)
 
-        ctk.CTkButton(left, text="Create .bimg", fg_color="#1f6feb", font=FONT, command=self.create_bimg_thread).grid(row=7, column=0, columnspan=3, padx=20, pady=(10, 20), sticky="ew")
-
-        # Right frame: .bimg -> Image
+        # ── Bottom frame: .bimg -> Image ───────────────────────────────────
         right = ctk.CTkFrame(self, corner_radius=6)
-        right.grid(row=1, column=0, padx=12, pady=12, sticky="nsew")
-        right.grid_columnconfigure((0,1,2), weight=1)
-        for r in range(11):
-            right.grid_rowconfigure(r, weight=0)
-        right.grid_rowconfigure(8, weight=1)  # spacer pushes button to bottom
+        right.grid(row=1, column=0, padx=12, pady=(6, 12), sticky="nsew")
 
-        ctk.CTkLabel(right, text=".bimg -> Image", font=TITLE_FONT).grid(row=0, column=0, columnspan=3, pady=(4, 4))
+        # Button packed at bottom FIRST
+        ctk.CTkButton(
+            right, text="Restore Image", fg_color="#16a34a", font=FONT,
+            command=self.restore_thread,
+        ).pack(side="bottom", fill="x", padx=16, pady=(8, 16))
 
-        self.bimg_entry = ctk.CTkEntry(right, placeholder_text="Select .bimg file...", font=FONT)
+        # Content area
+        rc = ctk.CTkFrame(right, fg_color="transparent")
+        rc.pack(side="top", fill="both", expand=True)
+        rc.grid_columnconfigure((0, 1, 2), weight=1)
+
+        ctk.CTkLabel(rc, text=".bimg -> Image", font=TITLE_FONT).grid(
+            row=0, column=0, columnspan=3, pady=(8, 4))
+
+        self.bimg_entry = ctk.CTkEntry(rc, placeholder_text="Select .bimg file...", font=FONT)
         self.bimg_entry.grid(row=1, column=0, columnspan=2, padx=8, pady=6, sticky="ew")
-        ctk.CTkButton(right, text="Browse", font=FONT, command=self.browse_bimg).grid(row=1, column=2, padx=4, pady=4)
+        ctk.CTkButton(rc, text="Browse", font=FONT, command=self.browse_bimg).grid(
+            row=1, column=2, padx=4, pady=4)
 
-        self.restore_entry = ctk.CTkEntry(right, placeholder_text="Output filename (e.g. restored.png)", font=FONT)
+        self.restore_entry = ctk.CTkEntry(
+            rc, placeholder_text="Output filename (e.g. restored.png)", font=FONT)
         self.restore_entry.grid(row=2, column=0, columnspan=2, padx=8, pady=6, sticky="ew")
         self.format_var = ctk.StringVar(value="PNG")
-        ctk.CTkOptionMenu(right, variable=self.format_var, values=["PNG", "JPEG"]).grid(row=2, column=2, padx=8, pady=6)
+        ctk.CTkOptionMenu(rc, variable=self.format_var, values=["PNG", "JPEG"]).grid(
+            row=2, column=2, padx=8, pady=6)
 
-        # Checkboxes side-by-side on the same row
         self.smooth_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(right, text="Smooth clustering artifacts", variable=self.smooth_var, font=FONT).grid(row=3, column=0, padx=4, pady=4, sticky="w")
+        ctk.CTkCheckBox(
+            rc, text="Smooth clustering artifacts", variable=self.smooth_var, font=FONT,
+        ).grid(row=3, column=0, padx=4, pady=4, sticky="w")
         self.smooth_var.trace_add("write", lambda *_: self.update_smooth_state())
 
         self.blur_var = ctk.BooleanVar(value=False)
-        self.blur_check = ctk.CTkCheckBox(right, text="Blur smoothed areas", variable=self.blur_var, font=FONT, state="disabled")
+        self.blur_check = ctk.CTkCheckBox(
+            rc, text="Blur smoothed areas", variable=self.blur_var, font=FONT, state="disabled")
         self.blur_check.grid(row=3, column=1, columnspan=2, padx=4, pady=4, sticky="w")
         self.blur_var.trace_add("write", lambda *_: self.update_blur_state())
 
-        # Sliders stacked directly above each other; label includes live value
         self.smooth_strength_var = ctk.DoubleVar(value=1.0)
-        self.smooth_strength_label = ctk.CTkLabel(right, text="Smooth strength: 100%", font=FONT, text_color="gray")
+        self.smooth_strength_label = ctk.CTkLabel(
+            rc, text="Smooth strength: 100%", font=FONT, text_color="gray")
         self.smooth_strength_label.grid(row=4, column=0, padx=4, pady=(8, 2), sticky="w")
-        self.smooth_strength_slider = ctk.CTkSlider(right, from_=0.0, to=2.0, number_of_steps=200, variable=self.smooth_strength_var, state="disabled")
+        self.smooth_strength_slider = ctk.CTkSlider(
+            rc, from_=0.0, to=2.0, number_of_steps=200,
+            variable=self.smooth_strength_var, state="disabled")
         self.smooth_strength_slider.grid(row=4, column=1, columnspan=2, padx=4, pady=(8, 2), sticky="ew")
         self.smooth_strength_slider.bind("<B1-Motion>", self.update_smooth_strength_label)
         self.smooth_strength_slider.bind("<Button-1>", self.update_smooth_strength_label)
 
-        # Primary blur radius (row 5)
         self.blur_radius_var = ctk.DoubleVar(value=2)
-        self.blur_radius_label = ctk.CTkLabel(right, text="Blur radius: 2px", font=FONT, text_color="gray")
+        self.blur_radius_label = ctk.CTkLabel(rc, text="Blur radius: 2px", font=FONT, text_color="gray")
         self.blur_radius_label.grid(row=5, column=0, padx=4, pady=(8, 2), sticky="w")
-        self.blur_radius_slider = ctk.CTkSlider(right, from_=1, to=20, number_of_steps=19, variable=self.blur_radius_var, state="disabled")
+        self.blur_radius_slider = ctk.CTkSlider(
+            rc, from_=1, to=20, number_of_steps=19,
+            variable=self.blur_radius_var, state="disabled")
         self.blur_radius_slider.grid(row=5, column=1, columnspan=2, padx=4, pady=(8, 2), sticky="ew")
         self.blur_radius_slider.bind("<B1-Motion>", self.update_blur_radius_label)
         self.blur_radius_slider.bind("<Button-1>", self.update_blur_radius_label)
 
-        # Extra blur passes: count label + [−] [+] buttons (row 6)
-        self.extra_blur_passes = []  # list of (DoubleVar, CTkLabel, CTkSlider)
-        self.blur_extra_passes_label = ctk.CTkLabel(right, text="Extra blur passes: 0", font=FONT, text_color="gray")
-        self.blur_extra_passes_label.grid(row=6, column=0, padx=4, pady=(8, 2), sticky="w")
-        self.blur_pass_remove_btn = ctk.CTkButton(right, text="−", width=36, font=FONT, state="disabled", command=self.remove_blur_pass)
-        self.blur_pass_remove_btn.grid(row=6, column=1, padx=(4, 2), pady=(8, 2), sticky="e")
-        self.blur_pass_add_btn = ctk.CTkButton(right, text="+", width=36, font=FONT, state="disabled", command=self.add_blur_pass)
-        self.blur_pass_add_btn.grid(row=6, column=2, padx=(2, 4), pady=(8, 2), sticky="w")
-
-        # Inner frame that holds the dynamically added blur-pass sliders (row 7)
-        self.blur_passes_frame = ctk.CTkFrame(right, fg_color="transparent")
-        self.blur_passes_frame.grid(row=7, column=0, columnspan=3, padx=0, pady=0, sticky="ew")
-        self.blur_passes_frame.grid_columnconfigure(0, weight=1)
-        self.blur_passes_frame.grid_columnconfigure(1, weight=2)
-
-        ctk.CTkButton(right, text="Restore Image", fg_color="#16a34a", font=FONT, command=self.restore_thread).grid(row=9, column=0, columnspan=3, padx=20, pady=(10, 20), sticky="ew")
 
         # Status bar
         self.status = ctk.CTkLabel(self, text="Ready", anchor="w")
-        self.status.grid(row=2, column=0, sticky="ew", padx=12, pady=(0,12))
-        # theme controls in a frame
+        self.status.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
         theme_frame = ctk.CTkFrame(self, fg_color="transparent")
-        theme_frame.grid(row=2, column=0, sticky="e", padx=12, pady=(0,12))
+        theme_frame.grid(row=2, column=0, sticky="e", padx=12, pady=(0, 12))
         ctk.CTkLabel(theme_frame, text="Theme:", font=FONT).pack(side="left", padx=(0, 4))
         self.theme_var = ctk.BooleanVar(value=(ctk.get_appearance_mode().lower() == "light"))
-        self.theme_switch = ctk.CTkSwitch(theme_frame, text="", variable=self.theme_var, command=self.toggle_theme)
+        self.theme_switch = ctk.CTkSwitch(
+            theme_frame, text="", variable=self.theme_var, command=self.toggle_theme)
         self.theme_switch.pack(side="left")
 
     def set_status(self, text):
@@ -183,7 +193,6 @@ class App(ctk.CTk):
         logger.debug(f"Status: {text}")
 
     def toggle_theme(self):
-        # use variable to determine target
         if self.theme_var.get():
             ctk.set_appearance_mode("light")
             logger.info("Theme switched to: light")
@@ -214,50 +223,9 @@ class App(ctk.CTk):
             self._clear_blur_controls()
 
     def _clear_blur_controls(self):
-        """Disable and reset all blur controls, destroying any extra pass sliders."""
+        """Disable and reset blur controls."""
         self.blur_radius_slider.configure(state="disabled")
         self.blur_radius_label.configure(text_color="gray")
-        self.blur_extra_passes_label.configure(text="Extra blur passes: 0", text_color="gray")
-        self.blur_pass_add_btn.configure(state="disabled")
-        self.blur_pass_remove_btn.configure(state="disabled")
-        for _, label, slider in self.extra_blur_passes:
-            label.destroy()
-            slider.destroy()
-        self.extra_blur_passes.clear()
-
-    def add_blur_pass(self):
-        """Append a new blur-pass slider row to blur_passes_frame."""
-        pass_num = len(self.extra_blur_passes) + 1
-        default_radius = min(2 + pass_num * 2, 20)
-        var = ctk.DoubleVar(value=default_radius)
-        label = ctk.CTkLabel(self.blur_passes_frame, text=f"Pass {pass_num + 1} radius: {default_radius}px", font=FONT)
-        slider = ctk.CTkSlider(self.blur_passes_frame, from_=1, to=20, number_of_steps=19, variable=var)
-        row = len(self.extra_blur_passes)
-        label.grid(row=row, column=0, padx=4, pady=(4, 2), sticky="w")
-        slider.grid(row=row, column=1, padx=4, pady=(4, 2), sticky="ew")
-
-        def make_updater(lbl, v, n):
-            def _update(_=None):
-                lbl.configure(text=f"Pass {n + 1} radius: {int(v.get())}px")
-            return _update
-
-        updater = make_updater(label, var, pass_num)
-        slider.bind("<B1-Motion>", updater)
-        slider.bind("<Button-1>", updater)
-        self.extra_blur_passes.append((var, label, slider))
-        self.blur_extra_passes_label.configure(text=f"Extra blur passes: {len(self.extra_blur_passes)}")
-        self.blur_pass_remove_btn.configure(state="normal")
-
-    def remove_blur_pass(self):
-        """Remove the last blur-pass slider row."""
-        if not self.extra_blur_passes:
-            return
-        _, label, slider = self.extra_blur_passes.pop()
-        label.destroy()
-        slider.destroy()
-        self.blur_extra_passes_label.configure(text=f"Extra blur passes: {len(self.extra_blur_passes)}")
-        if not self.extra_blur_passes:
-            self.blur_pass_remove_btn.configure(state="disabled")
 
     def update_blur_radius_label(self, event=None):
         radius = int(self.blur_radius_var.get())
@@ -281,9 +249,12 @@ class App(ctk.CTk):
         logger.debug(f"Cluster threshold updated to: {threshold}")
 
     def browse_image(self):
-        p = self.system_file_dialog(title="Select image")
+        exts = ["png", "jpg", "jpeg", "gif", "bmp", "tiff"]
+        p = self.system_file_dialog(title="Select image", exts=exts)
         if p is NotImplemented:
-            p = filedialog.askopenfilename(parent=self, filetypes=[("Image files", ("*.png","*.jpg","*.jpeg","*.gif","*.bmp","*.tiff")), ("All files", ("*.*",))])
+            p = filedialog.askopenfilename(
+                parent=self,
+                filetypes=[("Image files", tuple(f"*.{e}" for e in exts))])
         elif p is None:
             return
         if p:
@@ -291,9 +262,12 @@ class App(ctk.CTk):
             self.src_entry.insert(0, p)
 
     def browse_bimg(self):
-        p = self.system_file_dialog(title="Select bundle")
+        exts = ["bimg"]
+        p = self.system_file_dialog(title="Select .bimg bundle", exts=exts)
         if p is NotImplemented:
-            p = filedialog.askopenfilename(parent=self, filetypes=[("BIMG bundle", ("*.bimg","*.tar.gz")), ("All files", ("*.*",))])
+            p = filedialog.askopenfilename(
+                parent=self,
+                filetypes=[("BIMG bundle", "*.bimg")])
         elif p is None:
             return
         if p:
@@ -305,15 +279,20 @@ class App(ctk.CTk):
         t.daemon = True
         t.start()
 
-    def system_file_dialog(self, title="Select file"):
-        # try zenity/kdialog for a native feel on Linux
+    def system_file_dialog(self, title="Select file", exts=None):
+        """Open a native file dialog. exts is a list of extensions without dots, e.g. ['png','jpg'].
+        Returns the chosen path, None if cancelled, or NotImplemented if no native dialog found."""
         import shutil, subprocess, sys
         native_available = False
         if sys.platform.startswith("linux"):
             if shutil.which("zenity"):
                 native_available = True
                 try:
-                    res = subprocess.run(["zenity","--file-selection","--title",title], capture_output=True, text=True)
+                    cmd = ["zenity", "--file-selection", "--title", title]
+                    if exts:
+                        pattern = " ".join(f"*.{e}" for e in exts)
+                        cmd += ["--file-filter", pattern]
+                    res = subprocess.run(cmd, capture_output=True, text=True)
                     if res.returncode == 0:
                         return res.stdout.strip()
                     else:
@@ -323,19 +302,26 @@ class App(ctk.CTk):
             if shutil.which("kdialog"):
                 native_available = True
                 try:
-                    res = subprocess.run(["kdialog","--getopenfilename","",title], capture_output=True, text=True)
+                    filter_str = " ".join(f"*.{e}" for e in exts) if exts else "*"
+                    res = subprocess.run(
+                        ["kdialog", "--getopenfilename", "", filter_str],
+                        capture_output=True, text=True)
                     if res.returncode == 0:
                         return res.stdout.strip()
                     else:
                         return None
                 except Exception:
                     pass
-        # macOS apple script
+        # macOS AppleScript
         if sys.platform == "darwin":
             native_available = True
             try:
-                script = 'POSIX path of (choose file with prompt "' + title + '")'
-                res = subprocess.run(["osascript","-e",script], capture_output=True, text=True)
+                if exts:
+                    ext_list = ", ".join(f'"{e}"' for e in exts)
+                    script = f'POSIX path of (choose file with prompt "{title}" of type {{{ext_list}}})'
+                else:
+                    script = f'POSIX path of (choose file with prompt "{title}")'
+                res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
                 if res.returncode == 0:
                     return res.stdout.strip()
                 else:
@@ -379,10 +365,8 @@ class App(ctk.CTk):
             logger.error(f"Bundle not found: {src}")
             return
         out = self.restore_entry.get().strip()
-        # if user didn't supply a name, default to source base name
         if not out:
             out = os.path.splitext(os.path.basename(src))[0]
-        # append extension based on option menu selection
         fmt = self.format_var.get().upper()
         if not os.path.splitext(out)[1]:
             out = out + "." + fmt.lower()
@@ -391,7 +375,6 @@ class App(ctk.CTk):
         blur_passes = None
         if smooth_gradients and self.blur_var.get():
             blur_passes = [int(self.blur_radius_var.get())]
-            blur_passes += [int(var.get()) for var, _, _ in self.extra_blur_passes]
         logger.info(f"Restoring image: {src} -> {out}")
         logger.info(f"Settings: format={fmt}, smooth={smooth_gradients}, strength={smooth_strength:.2f}, blur_passes={blur_passes}")
         self.set_status("Restoring image...")

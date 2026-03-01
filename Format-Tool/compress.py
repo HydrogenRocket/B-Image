@@ -114,16 +114,131 @@ def kmeans_cluster(pixels, threshold=0):
     return indexed, palette, threshold
 
 
+# ---------------------------------------------------------------------------
+# PNG-style prediction filter helpers
+# ---------------------------------------------------------------------------
+
+def _paeth_predictor(a, b, c):
+    """PNG Paeth predictor function."""
+    p = a + b - c
+    pa = abs(p - a)
+    pb = abs(p - b)
+    pc = abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    elif pb <= pc:
+        return b
+    else:
+        return c
+
+
+def _apply_png_filter(filter_type, row, prev_row):
+    """Apply one of the 5 PNG filter types to a row of bytes.
+
+    filter_type: 0=None, 1=Sub, 2=Up, 3=Average, 4=Paeth
+    row: bytes of current row
+    prev_row: bytes of previous (original/decoded) row; same length as row
+    Returns filtered bytes.
+    """
+    n = len(row)
+    out = bytearray(n)
+    if filter_type == 0:  # None
+        out[:] = row
+    elif filter_type == 1:  # Sub
+        for i in range(n):
+            a = row[i - 1] if i > 0 else 0
+            out[i] = (row[i] - a) & 0xFF
+    elif filter_type == 2:  # Up
+        for i in range(n):
+            out[i] = (row[i] - prev_row[i]) & 0xFF
+    elif filter_type == 3:  # Average
+        for i in range(n):
+            a = row[i - 1] if i > 0 else 0
+            b = prev_row[i]
+            out[i] = (row[i] - ((a + b) >> 1)) & 0xFF
+    elif filter_type == 4:  # Paeth
+        for i in range(n):
+            a = row[i - 1] if i > 0 else 0
+            b = prev_row[i]
+            c = prev_row[i - 1] if i > 0 else 0
+            out[i] = (row[i] - _paeth_predictor(a, b, c)) & 0xFF
+    return bytes(out)
+
+
+def _best_png_filter(row, prev_row):
+    """Try all 5 PNG filter types; return (filter_type, filtered_row) with lowest score.
+
+    Score = sum of abs-as-signed-byte values (lower = better for compression).
+    """
+    best_type = 0
+    best_row = bytes(row)
+    best_score = float('inf')
+    for ft in range(5):
+        filtered = _apply_png_filter(ft, row, prev_row)
+        score = sum(min(b, 256 - b) for b in filtered)
+        if score < best_score:
+            best_score = score
+            best_type = ft
+            best_row = filtered
+    return best_type, best_row
+
+
+def _encode_planar_png(pixels, width, height):
+    """Encode RGB pixels using planar storage + PNG per-scanline filters.
+
+    Stores channels separately (all R, then all G, then all B).
+    For each channel plane, applies the best PNG filter per scanline.
+
+    Output format per channel:
+      height rows × (1 filter-type byte + width data bytes)
+    Total: 3 × height × (1 + width) bytes before LZMA.
+    """
+    r_plane = bytearray(width * height)
+    g_plane = bytearray(width * height)
+    b_plane = bytearray(width * height)
+    for i, px in enumerate(pixels):
+        r_plane[i] = px[0]
+        g_plane[i] = px[1]
+        b_plane[i] = px[2]
+
+    result = bytearray()
+    for plane in (r_plane, g_plane, b_plane):
+        prev_row = bytes(width)
+        for y in range(height):
+            row = bytes(plane[y * width:(y + 1) * width])
+            ft, filtered = _best_png_filter(row, prev_row)
+            result.append(ft)
+            result.extend(filtered)
+            prev_row = row
+    return bytes(result)
+
+
+def _pack_nibbles(indices, count):
+    """Pack palette indices (0–15) into nibbles: two indices per byte.
+
+    High nibble = first index, low nibble = second index.
+    A zero-padding nibble is appended when count is odd.
+    """
+    result = bytearray()
+    for i in range(0, count, 2):
+        hi = indices[i] & 0xF
+        lo = (indices[i + 1] & 0xF) if (i + 1) < count else 0
+        result.append((hi << 4) | lo)
+    return bytes(result)
+
+
 def pixels_to_binary(width, height, pixels, mode, use_palette=True, use_delta=True, cluster_threshold=0):
     """Convert pixels to compressed binary format with advanced optimizations.
 
     Format: width(4) + height(4) + mode(1) + flags(1) + [palette_data] + pixel_data
 
-    Optimizations:
-    - K-means clustering: reduce colors using lossy clustering (if cluster_threshold > 0)
-    - Palette mode: use indexed color for images with <= 256 unique colors
-    - Delta encoding: store differences between adjacent pixels
-    - Hex encoding: variable-length encoding for small palettes (≤16 colors = 4-bit)
+    Flags:
+    - 0x01: delta encoded (8-bit palette indices only)
+    - 0x02: palette mode
+    - 0x04: K-means clustering applied
+    - 0x08: planar channel storage + PNG per-scanline filters (raw RGB)
+    - 0x10: nibble-packed 4-bit palette indices (≤16 colors)
+    - 0x20: 16-bit palette indices (17–65535 colors)
     """
     # K-means clustering if enabled
     clustering_applied = False
@@ -131,136 +246,131 @@ def pixels_to_binary(width, height, pixels, mode, use_palette=True, use_delta=Tr
     palette_list = None
 
     if cluster_threshold > 0 and mode == "RGB":
-        # Apply K-means clustering
         indexed_pixels_list, palette_list, _ = kmeans_cluster(pixels, cluster_threshold)
         clustering_applied = True
-        # palette_list is already [R,G,B] format
 
-    # Try palette mode if enabled and not preserving alpha
-    palette_pixels = pixels
-    palette_data = b""
     mode_byte = 1 if mode == "RGBA" else 0
     flags = 0
+    palette_data = b""
+    final_pixel_bytes = b""
 
-    # If clustering was applied, use the clustered palette; otherwise try to build one
     if clustering_applied:
-        # Use clustering palette
+        # Use the K-means palette
+        n_colors = len(palette_list)
         mode_byte = 2  # INDEXED mode
-        flags |= 0x02  # palette flag
-        flags |= 0x04  # clustering flag
-        palette_data = struct.pack("<H", len(palette_list))
-        for r, g, b in palette_list:
-            palette_data += bytes([r, g, b])
-        palette_pixels = [[idx] for idx in indexed_pixels_list]
+        flags |= 0x02 | 0x04  # palette + clustering
+        palette_data = struct.pack("<H", n_colors)
+        for color in palette_list:
+            palette_data += bytes([int(color[0]), int(color[1]), int(color[2])])
+
+        indices = list(indexed_pixels_list)
+        if n_colors <= 16:
+            flags |= 0x10  # nibble packing
+            final_pixel_bytes = _pack_nibbles(indices, len(indices))
+        else:
+            # 8-bit indices with optional delta
+            if use_delta:
+                delta = [indices[0]]
+                for i in range(1, len(indices)):
+                    delta.append((indices[i] - indices[i - 1]) & 0xFF)
+                indices = delta
+                flags |= 0x01
+            final_pixel_bytes = bytes(indices)
+
     elif use_palette and mode == "RGB":
-        # Try to build a palette from actual colors
+        # Build a palette from unique colors (up to 65535)
         unique_colors = {}
         palette_list_auto = []
         indexed_pixels = []
         can_use_palette = True
 
-        flat = [val for pixel in pixels for val in pixel]
-        for i in range(0, len(flat), 3):
-            color = tuple(flat[i:i+3])
+        for pixel in pixels:
+            color = tuple(pixel[:3])
             if color not in unique_colors:
-                if len(unique_colors) >= 256:
+                if len(palette_list_auto) >= 65535:
                     can_use_palette = False
                     break
-                unique_colors[color] = len(palette_list_auto)
+                new_idx = len(palette_list_auto)
+                unique_colors[color] = new_idx
                 palette_list_auto.append(color)
             indexed_pixels.append(unique_colors[color])
 
-        if can_use_palette and len(palette_list_auto) < 256:
-            # Use palette mode
+        if can_use_palette:
+            n_colors = len(palette_list_auto)
             mode_byte = 2  # INDEXED mode
             flags |= 0x02  # palette flag
-            palette_data = struct.pack("<H", len(palette_list_auto))
+            palette_data = struct.pack("<H", n_colors)
             for r, g, b in palette_list_auto:
                 palette_data += bytes([r, g, b])
-            palette_pixels = [[idx] for idx in indexed_pixels]
 
-    # Apply delta encoding if enabled
-    encoded_pixels = palette_pixels[:]
-    if use_delta and len(palette_pixels) > 0:
-        bytes_per_pixel = len(palette_pixels[0])
-        delta_pixels = []
-        for i, pixel in enumerate(palette_pixels):
-            if i == 0:
-                delta_pixels.append(pixel[:])
+            if n_colors <= 16:
+                flags |= 0x10  # nibble packing
+                final_pixel_bytes = _pack_nibbles(indexed_pixels, len(indexed_pixels))
+            elif n_colors <= 256:
+                # 8-bit indices with optional delta
+                indices = indexed_pixels
+                if use_delta:
+                    delta = [indices[0]]
+                    for i in range(1, len(indices)):
+                        delta.append((indices[i] - indices[i - 1]) & 0xFF)
+                    indices = delta
+                    flags |= 0x01
+                final_pixel_bytes = bytes(indices)
             else:
-                prev_pixel = palette_pixels[i - 1]
-                delta = []
-                for j in range(bytes_per_pixel):
-                    diff = pixel[j] - prev_pixel[j]
-                    # Store as signed byte (-128 to 127)
-                    delta.append(diff & 0xFF)
-                delta_pixels.append(delta)
-        encoded_pixels = delta_pixels
-        flags |= 0x01  # delta flag
+                # 16-bit palette indices (no delta)
+                flags |= 0x20
+                buf = bytearray(len(indexed_pixels) * 2)
+                for i, idx in enumerate(indexed_pixels):
+                    buf[i * 2] = idx & 0xFF
+                    buf[i * 2 + 1] = (idx >> 8) & 0xFF
+                final_pixel_bytes = bytes(buf)
+        else:
+            # Too many unique colors — use planar + PNG filters
+            flags |= 0x08
+            final_pixel_bytes = _encode_planar_png(pixels, width, height)
 
-    # Build binary data
+    elif mode == "RGB":
+        # No palette requested — use planar + PNG filters
+        flags |= 0x08
+        final_pixel_bytes = _encode_planar_png(pixels, width, height)
+
+    else:
+        # RGBA: keep delta encoding on raw bytes (existing behavior)
+        encoded_pixels = pixels
+        if use_delta and pixels:
+            bytes_per_pixel = len(pixels[0])
+            delta_pixels = [list(pixels[0])]
+            for i in range(1, len(pixels)):
+                prev = pixels[i - 1]
+                delta_pixels.append([(pixels[i][j] - prev[j]) & 0xFF for j in range(bytes_per_pixel)])
+            encoded_pixels = delta_pixels
+            flags |= 0x01
+        flat = [val for px in encoded_pixels for val in px]
+        final_pixel_bytes = bytes(flat)
+
     binary = struct.pack("<II", width, height)
     binary += struct.pack("BB", mode_byte, flags)
     binary += palette_data
-
-    # Add pixel data (for now, standard 1-byte per index; hex encoding can be added later)
-    flat_pixels = [val for pixel in encoded_pixels for val in pixel]
-    binary += bytes(flat_pixels)
-
+    binary += final_pixel_bytes
     return binary
 
 
 def create_smart_bundle(image_path, out_path, pixels, width, height, mode, cluster_threshold=0):
-    """Create a .bimg bundle with smart format selection.
+    """Create a .bimg bundle using the optimized binary format with LZMA compression.
 
-    Compares:
-    - Optimized binary format (with LZMA preset=9, optional K-means clustering)
-    - Original PNG file (if available)
-
-    Uses whichever is smaller. Simple format: [format_byte][gzipped_data]
-    - Format byte: 0 = PNG, 1 = Binary optimized
+    Format: [format_byte=1][lzma_data]
 
     Args:
         cluster_threshold: 0-255, where 0=lossless, 255=extreme compression (2 colors)
     """
-    import gzip
-
-    # Try optimized binary format with optional clustering
     binary_data = pixels_to_binary(width, height, pixels, mode, use_palette=True, use_delta=True, cluster_threshold=cluster_threshold)
     binary_compressed = lzma.compress(binary_data, preset=9)
 
-    # Try original PNG if it's a PNG file
-    use_original_png = False
-    original_png_data = None
-
-    if image_path.lower().endswith('.png'):
-        try:
-            with open(image_path, 'rb') as f:
-                original_png_data = f.read()
-        except Exception:
-            original_png_data = None
-
-    # Compare sizes: use original PNG if it's smaller
-    if original_png_data and len(original_png_data) < len(binary_compressed):
-        use_original_png = True
-        data_to_store = original_png_data
-        format_byte = 0
-    else:
-        data_to_store = binary_compressed
-        format_byte = 1
-
-    # Write with minimal format: [format_byte|data]
     with open(out_path, 'wb') as f:
-        f.write(bytes([format_byte]))
-        f.write(data_to_store)
+        f.write(bytes([1]))  # format_byte=1: binary optimized
+        f.write(binary_compressed)
 
-    # Report what was used
-    if use_original_png:
-        print(f"Smart bundle: Using original PNG ({len(data_to_store)} bytes)")
-    else:
-        print(f"Smart bundle: Using optimized binary ({len(data_to_store)} bytes)")
-
-    return
+    print(f"Smart bundle: {len(binary_compressed)} bytes")
 
 
 def main():

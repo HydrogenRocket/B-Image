@@ -10,7 +10,6 @@ import argparse
 import json
 import sys
 import tarfile
-import io
 import logging
 import struct
 import lzma
@@ -201,15 +200,100 @@ def smooth_clustering_artifacts(pixels, width, height, strength=1.0, blur_passes
     return smoothed
 
 
+# ---------------------------------------------------------------------------
+# PNG-style prediction filter helpers (decode side)
+# ---------------------------------------------------------------------------
+
+def _paeth_predictor(a, b, c):
+    """PNG Paeth predictor function."""
+    p = a + b - c
+    pa = abs(p - a)
+    pb = abs(p - b)
+    pc = abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    elif pb <= pc:
+        return b
+    else:
+        return c
+
+
+def _undo_png_filter(filter_type, row, prev_row):
+    """Reverse one of the 5 PNG filter types on a row of bytes.
+
+    filter_type: 0=None, 1=Sub, 2=Up, 3=Average, 4=Paeth
+    row: filtered bytes
+    prev_row: decoded previous row; same length as row
+    Returns original (decoded) bytes.
+    """
+    n = len(row)
+    out = bytearray(n)
+    if filter_type == 0:  # None
+        out[:] = row
+    elif filter_type == 1:  # Sub
+        for i in range(n):
+            a = out[i - 1] if i > 0 else 0
+            out[i] = (row[i] + a) & 0xFF
+    elif filter_type == 2:  # Up
+        for i in range(n):
+            out[i] = (row[i] + prev_row[i]) & 0xFF
+    elif filter_type == 3:  # Average
+        for i in range(n):
+            a = out[i - 1] if i > 0 else 0
+            b = prev_row[i]
+            out[i] = (row[i] + ((a + b) >> 1)) & 0xFF
+    elif filter_type == 4:  # Paeth
+        for i in range(n):
+            a = out[i - 1] if i > 0 else 0
+            b = prev_row[i]
+            c = prev_row[i - 1] if i > 0 else 0
+            out[i] = (row[i] + _paeth_predictor(a, b, c)) & 0xFF
+    return bytes(out)
+
+
+def _decode_planar_png(data, width, height):
+    """Decode planar PNG-filtered data back to a list of [R, G, B] pixels.
+
+    Expects data in the format written by _encode_planar_png:
+      3 channel planes (R, G, B), each plane = height rows of (1 filter byte + width bytes).
+    """
+    pixels = [[0, 0, 0] for _ in range(width * height)]
+    offset = 0
+    for channel in range(3):
+        prev_row = bytes(width)
+        for y in range(height):
+            filter_type = data[offset]
+            offset += 1
+            row = bytes(data[offset:offset + width])
+            offset += width
+            decoded_row = _undo_png_filter(filter_type, row, prev_row)
+            for x in range(width):
+                pixels[y * width + x][channel] = decoded_row[x]
+            prev_row = decoded_row
+    return pixels
+
+
+def _unpack_nibbles(data, count):
+    """Unpack nibble-packed indices (2 per byte) into a list of count integers."""
+    indices = []
+    for byte in data:
+        indices.append((byte >> 4) & 0xF)
+        indices.append(byte & 0xF)
+    return indices[:count]
+
+
 def binary_to_pixels(binary_data, decompressed=False):
     """Convert binary data back to (width, height, pixels, mode, clustering_applied).
 
     Binary format: width(4) + height(4) + mode(1) + flags(1) + [palette] + pixel_data
 
     Flags:
-    - 0x01: delta encoded
+    - 0x01: delta encoded (8-bit palette indices)
     - 0x02: palette mode
     - 0x04: K-means clustering applied
+    - 0x08: planar channel storage + PNG per-scanline filters (raw RGB)
+    - 0x10: nibble-packed 4-bit palette indices (≤16 colors)
+    - 0x20: 16-bit palette indices (17–65535 colors)
     """
     logger.info(f"Decoding binary data (decompressed={decompressed})")
     if not decompressed:
@@ -225,70 +309,93 @@ def binary_to_pixels(binary_data, decompressed=False):
     has_delta = bool(flags & 0x01)
     has_palette = bool(flags & 0x02)
     has_clustering = bool(flags & 0x04)
+    has_planar = bool(flags & 0x08)
+    has_nibble = bool(flags & 0x10)
+    has_16bit = bool(flags & 0x20)
 
-    logger.info(f"Image: {width}x{height}, flags: delta={has_delta}, palette={has_palette}, clustering={has_clustering}")
+    logger.info(
+        f"Image: {width}x{height}, flags: delta={has_delta}, palette={has_palette}, "
+        f"clustering={has_clustering}, planar={has_planar}, nibble={has_nibble}, 16bit={has_16bit}"
+    )
 
     offset = 10
     palette = None
 
     # Read palette if present
     if has_palette:
-        palette_size = struct.unpack("<H", binary_data[offset:offset+2])[0]
+        palette_size = struct.unpack("<H", binary_data[offset:offset + 2])[0]
         offset += 2
         palette = []
         for _ in range(palette_size):
-            r, g, b = binary_data[offset:offset+3]
+            r, g, b = binary_data[offset:offset + 3]
             palette.append([r, g, b])
             offset += 3
         logger.info(f"Palette loaded: {palette_size} colors")
 
-    # Determine mode and bytes per pixel
-    if has_palette:
+    total_pixels = width * height
+    pixel_data = binary_data[offset:]
+
+    if has_planar:
+        # Planar + PNG filters — raw RGB, no palette
         mode = "RGB"
-        bytes_per_pixel = 1
-    elif mode_byte == 1:
-        mode = "RGBA"
-        bytes_per_pixel = 4
+        logger.info("Decoding planar PNG-filtered pixel data...")
+        pixels = _decode_planar_png(pixel_data, width, height)
+
+    elif has_palette:
+        mode = "RGB"
+        if has_nibble:
+            # 4-bit nibble-packed palette indices
+            logger.info("Decoding nibble-packed palette indices...")
+            nibble_bytes = (total_pixels + 1) // 2
+            indices = _unpack_nibbles(pixel_data[:nibble_bytes], total_pixels)
+            pixels = [list(palette[idx]) for idx in indices]
+        elif has_16bit:
+            # 16-bit palette indices
+            logger.info("Decoding 16-bit palette indices...")
+            indices = []
+            for i in range(total_pixels):
+                lo = pixel_data[i * 2]
+                hi = pixel_data[i * 2 + 1]
+                indices.append(lo | (hi << 8))
+            pixels = [list(palette[idx]) for idx in indices]
+        else:
+            # Standard 8-bit palette indices (with optional delta)
+            raw_indices = list(pixel_data[:total_pixels])
+            if len(raw_indices) != total_pixels:
+                raise ValueError(f"Palette index data size mismatch: got {len(raw_indices)}, expected {total_pixels}")
+            if has_delta:
+                logger.info("Reversing delta encoding on palette indices...")
+                decoded = [raw_indices[0]]
+                for i in range(1, total_pixels):
+                    decoded.append((decoded[i - 1] + raw_indices[i]) & 0xFF)
+                raw_indices = decoded
+            pixels = [list(palette[idx]) for idx in raw_indices]
+
     else:
-        mode = "RGB"
-        bytes_per_pixel = 3
+        # Raw RGB or RGBA — no palette, no planar (legacy or RGBA)
+        if mode_byte == 1:
+            mode = "RGBA"
+            bytes_per_pixel = 4
+        else:
+            mode = "RGB"
+            bytes_per_pixel = 3
 
-    # Read pixel data
-    pixel_bytes = binary_data[offset:]
-    expected_size = width * height * bytes_per_pixel
-    if len(pixel_bytes) != expected_size:
-        raise ValueError(f"Pixel data size mismatch: got {len(pixel_bytes)}, expected {expected_size}")
+        expected_size = total_pixels * bytes_per_pixel
+        pixel_bytes = pixel_data[:expected_size]
+        if len(pixel_bytes) != expected_size:
+            raise ValueError(f"Pixel data size mismatch: got {len(pixel_bytes)}, expected {expected_size}")
 
-    # Decode pixels
-    pixels = []
-    for i in range(0, len(pixel_bytes), bytes_per_pixel):
-        pixel = list(pixel_bytes[i:i+bytes_per_pixel])
-        pixels.append(pixel)
+        raw_pixels = [list(pixel_bytes[i:i + bytes_per_pixel]) for i in range(0, expected_size, bytes_per_pixel)]
 
-    # Reverse delta encoding if applied
-    if has_delta:
-        logger.info("Reversing delta encoding...")
-        delta_pixels = pixels
-        pixels = []
-        for i, delta in enumerate(delta_pixels):
-            if i == 0:
-                pixels.append(delta[:])
-            else:
-                prev_pixel = pixels[i - 1]
-                actual = []
-                for j in range(bytes_per_pixel):
-                    val = (prev_pixel[j] + delta[j]) & 0xFF
-                    actual.append(val)
-                pixels.append(actual)
+        if has_delta:
+            logger.info("Reversing delta encoding...")
+            decoded = [raw_pixels[0][:]]
+            for i in range(1, total_pixels):
+                prev = decoded[i - 1]
+                decoded.append([(prev[j] + raw_pixels[i][j]) & 0xFF for j in range(bytes_per_pixel)])
+            raw_pixels = decoded
 
-    # Map palette indices back to RGB
-    if has_palette and palette:
-        logger.info("Mapping palette indices to RGB...")
-        rgb_pixels = []
-        for idx_list in pixels:
-            idx = idx_list[0]
-            rgb_pixels.append(palette[idx])
-        pixels = rgb_pixels
+        pixels = raw_pixels
 
     logger.info(f"Binary decode complete: {len(pixels)} pixels, mode={mode}")
     return width, height, pixels, mode, has_clustering
@@ -325,10 +432,8 @@ def decompress_image(input_path, out_path, smooth_gradients=False, smooth_streng
             # Smart bundle: Format 0 = PNG, 1 = Binary optimized
             data = f.read()
             if format_byte == 0:
-                # Direct PNG (wrapped in smart bundle)
-                logger.info("Format: Direct PNG (wrapped) - copying directly")
+                logger.info("Format: Direct PNG - copying directly")
                 with open(out_path, 'wb') as out:
-                    # data already has the format byte stripped because we read it as first_byte
                     out.write(data)
                 return
             elif format_byte == 1:

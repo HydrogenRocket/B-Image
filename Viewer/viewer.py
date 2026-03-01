@@ -30,8 +30,6 @@ class BImageViewer(ctk.CTk):
         self.display_image = None
         self.zoom_level = 1.0
         self.canvas_image_id = None
-        self.extra_blur_passes = []  # list of (DoubleVar, CTkLabel, CTkSlider)
-
         # UI Setup
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -133,14 +131,17 @@ class BImageViewer(ctk.CTk):
         radius = int(float(value))
         self.blur_radius_label.configure(text=f"Blur radius: {radius}px")
 
-    def system_file_dialog(self, title="Select file"):
+    def system_file_dialog(self, title="Select file", exts=None):
         import shutil, subprocess, sys
         native_available = False
         if sys.platform.startswith("linux"):
             if shutil.which("zenity"):
                 native_available = True
                 try:
-                    res = subprocess.run(["zenity","--file-selection","--title",title], capture_output=True, text=True)
+                    cmd = ["zenity", "--file-selection", "--title", title]
+                    if exts:
+                        cmd += ["--file-filter", " ".join(f"*.{e}" for e in exts)]
+                    res = subprocess.run(cmd, capture_output=True, text=True)
                     if res.returncode == 0:
                         return res.stdout.strip()
                     else:
@@ -149,7 +150,8 @@ class BImageViewer(ctk.CTk):
             if shutil.which("kdialog"):
                 native_available = True
                 try:
-                    res = subprocess.run(["kdialog","--getopenfilename","",title], capture_output=True, text=True)
+                    filter_str = " ".join(f"*.{e}" for e in exts) if exts else "*"
+                    res = subprocess.run(["kdialog", "--getopenfilename", "", filter_str], capture_output=True, text=True)
                     if res.returncode == 0:
                         return res.stdout.strip()
                     else:
@@ -158,8 +160,12 @@ class BImageViewer(ctk.CTk):
         if sys.platform == "darwin":
             native_available = True
             try:
-                script = 'POSIX path of (choose file with prompt "' + title + '")'
-                res = subprocess.run(["osascript","-e",script], capture_output=True, text=True)
+                if exts:
+                    ext_list = ", ".join(f'"{e}"' for e in exts)
+                    script = f'POSIX path of (choose file with prompt "{title}" of type {{{ext_list}}})'
+                else:
+                    script = f'POSIX path of (choose file with prompt "{title}")'
+                res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
                 if res.returncode == 0:
                     return res.stdout.strip()
                 else:
@@ -170,9 +176,9 @@ class BImageViewer(ctk.CTk):
         return None
 
     def open_file(self):
-        path = self.system_file_dialog(title="Open .bimg bundle")
+        path = self.system_file_dialog(title="Open .bimg bundle", exts=["bimg"])
         if path is NotImplemented:
-            path = filedialog.askopenfilename(filetypes=[("BIMG bundle", "*.bimg"), ("All files", "*.*")])
+            path = filedialog.askopenfilename(filetypes=[("BIMG bundle", "*.bimg")])
         elif path is None:
             return
 
