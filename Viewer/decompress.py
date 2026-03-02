@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-def smooth_clustering_artifacts(pixels, width, height, strength=1.0, blur_passes=None):
+def smooth_clustering_artifacts(pixels, width, height, strength=1.0, blur_passes=None, min_region_pct=0.1):
     """Smooth K-means banding with a full gradient across each large color region.
 
     Instead of blending only the 1-pixel boundary ring, this computes each pixel's
@@ -76,9 +76,9 @@ def smooth_clustering_artifacts(pixels, width, height, strength=1.0, blur_passes
         for idx in region:
             region_id[idx] = rid
 
-    # 0.1% of total pixels, minimum 30 — skips small regions (genuine detail)
-    min_region = max(30, total // 1000)
-    logger.info(f"Region size threshold: {min_region}px")
+    # min_region_pct % of total pixels, minimum 2 — skips small regions (genuine detail)
+    min_region = max(2, int(min_region_pct / 100.0 * total))
+    logger.info(f"Region size threshold: {min_region}px ({min_region_pct:.2f}%)")
 
     # --- Step 2: BFS inward from region boundaries ---
     # For every pixel in a large region we compute:
@@ -145,59 +145,70 @@ def smooth_clustering_artifacts(pixels, width, height, strength=1.0, blur_passes
             if d > max_dist_per_region.get(rid, 0):
                 max_dist_per_region[rid] = d
 
-    # --- Step 3: Apply the gradient ---
-    # blend_amount = strength * (1 - dist/max_dist)
-    #   → 'strength' at the boundary, 0 at the centre
-    smoothed = [list(p) for p in pixels]
-    blended = 0
+    # --- Step 3: Apply the gradient (vectorised with numpy) ---
+    import numpy as np
+    pixels_arr = np.array(pixels, dtype=np.float32)                            # N×3
+    dist_arr   = np.array(dist,   dtype=np.float32)                            # N (−1 = unvisited)
+    target_arr = np.column_stack([target_r, target_g, target_b]).astype(np.float32)
 
-    for idx in range(total):
-        d = dist[idx]
-        if d == -1:
-            continue
-        rid = region_id[idx]
-        max_d = max_dist_per_region.get(rid, 1) or 1
-        blend_amount = max(0.0, min(1.0, strength * (1.0 - d / max_d)))
-        if blend_amount <= 0.0:
-            continue
-        r, g, b = pixels[idx]
-        smoothed[idx][0] = max(0, min(255, int(r + blend_amount * (target_r[idx] - r))))
-        smoothed[idx][1] = max(0, min(255, int(g + blend_amount * (target_g[idx] - g))))
-        smoothed[idx][2] = max(0, min(255, int(b + blend_amount * (target_b[idx] - b))))
-        blended += 1
+    # Per-pixel max_dist lookup table
+    n_regions = len(region_sizes)
+    max_d_lookup = np.ones(n_regions, dtype=np.float32)
+    for rid, md in max_dist_per_region.items():
+        max_d_lookup[rid] = max(float(md), 1.0)
+    region_id_arr = np.array(region_id, dtype=np.int32)
+    max_d_arr = max_d_lookup[region_id_arr]                                    # N
+
+    valid     = dist_arr >= 0
+    blend_arr = np.where(
+        valid,
+        np.clip(strength * (1.0 - dist_arr / np.where(valid, max_d_arr, 1.0)), 0.0, 1.0),
+        0.0,
+    )
+    smoothed_arr = np.clip(
+        pixels_arr + blend_arr[:, np.newaxis] * (target_arr - pixels_arr), 0, 255
+    ).astype(np.uint8)
+    blended = int(np.sum(blend_arr > 0))
 
     logger.info(f"Gradient smoothing complete: {blended} pixels blended across {len(max_dist_per_region)} regions")
 
-    # --- Optional blur passes (one per entry in blur_passes) ---
-    # Each pass operates on the result of the previous one.
-    # Only pixels inside large smoothed regions are blurred; unsmoothed detail
-    # pixels are left untouched. Sampling from the full array (including
-    # unsmoothed neighbours) gives a natural feather at region boundaries.
-    for pass_num, pass_radius in enumerate(blur_passes or [], start=1):
-        if pass_radius <= 0:
-            continue
-        logger.info(f"Applying box blur pass {pass_num} (radius={pass_radius}px)...")
-        blurred = [row[:] for row in smoothed]
-        for idx in range(total):
-            if dist[idx] == -1:
-                continue
-            x, y = idx % width, idx // width
-            sr = sg = sb = count = 0
-            for by in range(max(0, y - pass_radius), min(height, y + pass_radius + 1)):
-                row_base = by * width
-                for bx in range(max(0, x - pass_radius), min(width, x + pass_radius + 1)):
-                    p = smoothed[row_base + bx]
-                    sr += p[0]
-                    sg += p[1]
-                    sb += p[2]
-                    count += 1
-            blurred[idx][0] = sr // count
-            blurred[idx][1] = sg // count
-            blurred[idx][2] = sb // count
-        smoothed = blurred
-        logger.info(f"Box blur pass {pass_num} applied")
+    # --- Optional blur passes (O(N) separable box blur via cumsum) ---
+    # The cumsum trick reduces the inner kernel from O(r²) to O(1) per pixel,
+    # turning the whole pass from O(N·r²) pure-Python loops into two O(N)
+    # numpy cumsum calls — typically 100-500× faster for large images.
+    if blur_passes:
+        arr = smoothed_arr.reshape(height, width, 3).astype(np.float32)
+        smooth_mask = valid.reshape(height, width)   # only blur touched pixels
 
-    return smoothed
+        for pass_num, pass_radius in enumerate(blur_passes, start=1):
+            if pass_radius <= 0:
+                continue
+            logger.info(f"Applying box blur pass {pass_num} (radius={pass_radius}px)...")
+            H, W, r = height, width, pass_radius
+
+            # Horizontal cumsum pass
+            cs    = np.cumsum(arr, axis=1, dtype=np.float32)
+            xs    = np.arange(W)
+            x_lo  = np.maximum(xs - r, 0)
+            x_hi  = np.minimum(xs + r, W - 1)
+            cs_pad = np.concatenate([np.zeros((H, 1, 3), dtype=np.float32), cs], axis=1)
+            h_blur = (cs_pad[:, x_hi + 1, :] - cs_pad[:, x_lo, :]) / (x_hi - x_lo + 1).astype(np.float32)[np.newaxis, :, np.newaxis]
+
+            # Vertical cumsum pass
+            cs    = np.cumsum(h_blur, axis=0, dtype=np.float32)
+            ys    = np.arange(H)
+            y_lo  = np.maximum(ys - r, 0)
+            y_hi  = np.minimum(ys + r, H - 1)
+            cs_pad = np.concatenate([np.zeros((1, W, 3), dtype=np.float32), cs], axis=0)
+            blurred = (cs_pad[y_hi + 1, :, :] - cs_pad[y_lo, :, :]) / (y_hi - y_lo + 1).astype(np.float32)[:, np.newaxis, np.newaxis]
+
+            # Only write blurred values back into smoothed pixels
+            arr = np.where(smooth_mask[:, :, np.newaxis], blurred, arr)
+            logger.info(f"Box blur pass {pass_num} applied")
+
+        smoothed_arr = np.clip(arr, 0, 255).astype(np.uint8).reshape(-1, 3)
+
+    return smoothed_arr.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +412,7 @@ def binary_to_pixels(binary_data, decompressed=False):
     return width, height, pixels, mode, has_clustering
 
 
-def decompress_image(input_path, out_path, smooth_gradients=False, smooth_strength=1.0, blur_passes=None):
+def decompress_image(input_path, out_path, smooth_gradients=False, smooth_strength=1.0, blur_passes=None, smooth_sensitivity=0.1):
     # Support:
     # 1. .bimg smart bundles (format_byte + data)
     # 2. Raw PNG files (starting with 0x89)
@@ -443,7 +454,7 @@ def decompress_image(input_path, out_path, smooth_gradients=False, smooth_streng
                 # Apply optional gradient smoothing if clustering was used and smoothing enabled
                 if has_clustering and smooth_gradients:
                     logger.info("Applying gradient smoothing to clustering artifacts...")
-                    pixels = smooth_clustering_artifacts(pixels, width, height, strength=smooth_strength, blur_passes=blur_passes)
+                    pixels = smooth_clustering_artifacts(pixels, width, height, strength=smooth_strength, blur_passes=blur_passes, min_region_pct=smooth_sensitivity)
                     logger.info("Gradient smoothing applied")
                 data_dict = {"width": width, "height": height, "pixels": pixels, "mode": mode}
             else:
@@ -504,7 +515,7 @@ def decompress_image(input_path, out_path, smooth_gradients=False, smooth_streng
                     width, height, pixels, mode, has_clustering = binary_to_pixels(raw, decompressed=False)
                     # Apply optional gradient smoothing if clustering was used and smoothing enabled
                     if has_clustering and smooth_gradients:
-                        pixels = smooth_clustering_artifacts(pixels, width, height, strength=smooth_strength, blur_passes=blur_passes)
+                        pixels = smooth_clustering_artifacts(pixels, width, height, strength=smooth_strength, blur_passes=blur_passes, min_region_pct=smooth_sensitivity)
                     data_dict = {"width": width, "height": height, "pixels": pixels, "mode": mode}
                 else:
                     try:

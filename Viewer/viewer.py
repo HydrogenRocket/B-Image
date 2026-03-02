@@ -37,7 +37,7 @@ class BImageViewer(ctk.CTk):
         # --- Sidebar ---
         self.sidebar = ctk.CTkFrame(self, width=250, corner_radius=0)
         self.sidebar.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=0, pady=0)
-        self.sidebar.grid_rowconfigure(10, weight=1) # spacer
+        self.sidebar.grid_rowconfigure(12, weight=1) # spacer
 
         ctk.CTkLabel(self.sidebar, text="B-IMG Viewer", font=("Arial", 20, "bold")).grid(row=0, column=0, padx=20, pady=(20, 10))
         
@@ -67,8 +67,14 @@ class BImageViewer(ctk.CTk):
         self.blur_radius_slider = ctk.CTkSlider(self.sidebar, from_=1, to=20, number_of_steps=19, variable=self.blur_radius_var, state="disabled", command=self.update_blur_radius_label)
         self.blur_radius_slider.grid(row=8, column=0, padx=20, pady=5, sticky="ew")
 
+        self.smooth_sensitivity_var = ctk.DoubleVar(value=0.1)
+        self.smooth_sensitivity_label = ctk.CTkLabel(self.sidebar, text="Region threshold: 0.10%", text_color="gray")
+        self.smooth_sensitivity_label.grid(row=9, column=0, padx=20, pady=(5, 0), sticky="w")
+        self.smooth_sensitivity_slider = ctk.CTkSlider(self.sidebar, from_=0.0, to=0.5, number_of_steps=500, variable=self.smooth_sensitivity_var, state="disabled", command=self.update_sensitivity_label)
+        self.smooth_sensitivity_slider.grid(row=10, column=0, padx=20, pady=5, sticky="ew")
+
         self.apply_btn = ctk.CTkButton(self.sidebar, text="Apply Changes", command=self.reload_current_file, fg_color="#16a34a", state="disabled")
-        self.apply_btn.grid(row=9, column=0, padx=20, pady=20)
+        self.apply_btn.grid(row=11, column=0, padx=20, pady=20)
 
         # --- Main Content ---
         # Toolbar
@@ -100,10 +106,14 @@ class BImageViewer(ctk.CTk):
             self.smooth_strength_slider.configure(state="normal")
             self.smooth_strength_label.configure(text_color=("black", "white"))
             self.blur_check.configure(state="normal")
+            self.smooth_sensitivity_slider.configure(state="normal")
+            self.smooth_sensitivity_label.configure(text_color=("black", "white"))
         else:
             self.smooth_strength_slider.configure(state="disabled")
             self.smooth_strength_label.configure(text_color="gray")
             self.blur_check.configure(state="disabled")
+            self.smooth_sensitivity_slider.configure(state="disabled")
+            self.smooth_sensitivity_label.configure(text_color="gray")
             self.blur_var.set(False)
             self.update_blur_state()
         self.update_apply_btn_state()
@@ -130,6 +140,10 @@ class BImageViewer(ctk.CTk):
     def update_blur_radius_label(self, value):
         radius = int(float(value))
         self.blur_radius_label.configure(text=f"Blur radius: {radius}px")
+
+    def update_sensitivity_label(self, value):
+        val = float(value)
+        self.smooth_sensitivity_label.configure(text=f"Region threshold: {val:.2f}%")
 
     def system_file_dialog(self, title="Select file", exts=None):
         import shutil, subprocess, sys
@@ -204,7 +218,8 @@ class BImageViewer(ctk.CTk):
         self.blur_check.configure(state=state)
         self.smooth_strength_slider.configure(state=state)
         self.blur_radius_slider.configure(state=state)
-        
+        self.smooth_sensitivity_slider.configure(state=state)
+
         if state == "normal":
             self.update_smooth_state()
             self.update_blur_state()
@@ -214,9 +229,10 @@ class BImageViewer(ctk.CTk):
             temp_out = "viewer_temp_load.png"
             smooth = self.smooth_var.get()
             strength = self.smooth_strength_var.get()
+            sensitivity = self.smooth_sensitivity_var.get()
             blur_passes = [int(self.blur_radius_var.get())] if smooth and self.blur_var.get() else None
 
-            decompress.decompress_image(self.current_path, temp_out, smooth_gradients=smooth, smooth_strength=strength, blur_passes=blur_passes)
+            decompress.decompress_image(self.current_path, temp_out, smooth_gradients=smooth, smooth_strength=strength, blur_passes=blur_passes, smooth_sensitivity=sensitivity)
             
             loaded_img = Image.open(temp_out)
             self.original_image = loaded_img.copy()

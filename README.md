@@ -11,7 +11,9 @@ A utility for compressing images into `.bimg` bundles and decompressing them bac
   - 16-bit palette indices for up to 65,535 unique colors
   - Planar channel storage + PNG-style prediction filters (None/Sub/Up/Average/Paeth) for photographic images
   - LZMA compression as the final pass on all formats
-- **Gradient smoothing** — optional BFS-based gradient fill reduces K-means banding artifacts on decompression, with an adjustable blur radius
+- **Post-processing** — optional decompression-side smoothing pipeline to recover visual quality from lossy compression:
+  - BFS-based gradient fill blends each color region smoothly from its edges inward
+  - Adjustable smooth strength (0–200%), blur radius (1–20 px), and region threshold (controls minimum region size — lower catches smaller K-means patches)
 - **GUI, Viewer, and CLI** — a CustomTkinter desktop app, a standalone viewer, and command-line scripts
 - **Alpha channel support** — optionally preserve transparency (RGBA)
 - **Native file pickers** — uses `zenity` or `kdialog` on Linux, native dialogs on macOS, with file type filtering
@@ -44,7 +46,11 @@ The window has two panels:
 **.bimg → Image** (decompress)
 - Browse for a `.bimg` file
 - Choose an output filename and format (PNG, JPEG, etc.)
-- Optionally enable **Smooth clustering artifacts** to reduce banding from lossy compression, with adjustable strength and blur radius
+- Optionally enable **Smooth clustering artifacts** and configure the post-processing pipeline:
+  - **Smooth strength** — how aggressively the gradient is blended (0–200%)
+  - **Blur smoothed areas** — applies a box blur on top of the gradient fill
+  - **Blur radius** — kernel size in pixels (1–20 px)
+  - **Region threshold** — minimum region size as a percentage of total pixels; lower values catch smaller K-means patches (0–0.5%, default 0.10%)
 - Click **Restore Image**
 
 A theme toggle in the bottom-right switches between light and dark modes.
@@ -55,7 +61,19 @@ A theme toggle in the bottom-right switches between light and dark modes.
 python Viewer/viewer.py
 ```
 
-Opens `.bimg` files directly for preview, with the same gradient smoothing controls as the main GUI.
+Opens `.bimg` files directly for preview. The sidebar exposes the full post-processing pipeline — smooth strength, blur radius, and region threshold — with an **Apply Changes** button to re-render with the current settings.
+
+## Post-processing example
+
+Lossy compression reduces the number of distinct colors via K-means clustering, which introduces flat color bands (posterization) in areas that originally had smooth gradients — most visible in soft bokeh backgrounds and sky gradients.
+
+The post-processing pipeline blends each color region smoothly from its edges inward (BFS gradient fill), then optionally applies a box blur on top. The **region threshold** controls sensitivity: lower values process smaller color patches, which is important at high compression levels where many small K-means regions are created.
+
+| Original | Compressed (40) + restored (smooth strength 75%, blur radius 20 px, region threshold 0.01%) |
+|---|---|
+| ![Original](origional.jpg) | ![Compressed and restored with post-processing](converted-restored.png) |
+
+The restored image retains the overall composition and color palette while the gradient smoothing softens the K-means banding in the blue background. Fine high-frequency detail (sparkles, texture) is intentionally left unblurred — only large flat color regions are processed.
 
 ## CLI
 
@@ -111,3 +129,5 @@ The binary header contains:
 | `0x08` | Planar channel storage + PNG prediction filters (photographic images) |
 | `0x10` | Nibble-packed 4-bit palette indices (≤ 16 colors) |
 | `0x20` | 16-bit palette indices (17–65,535 colors) |
+
+**This is still very experimental**

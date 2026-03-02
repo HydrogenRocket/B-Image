@@ -176,6 +176,16 @@ class App(ctk.CTk):
         self.blur_radius_slider.bind("<B1-Motion>", self.update_blur_radius_label)
         self.blur_radius_slider.bind("<Button-1>", self.update_blur_radius_label)
 
+        self.smooth_sensitivity_var = ctk.DoubleVar(value=0.1)
+        self.smooth_sensitivity_label = ctk.CTkLabel(
+            rc, text="Region threshold: 0.10%", font=FONT, text_color="gray")
+        self.smooth_sensitivity_label.grid(row=6, column=0, padx=4, pady=(8, 2), sticky="w")
+        self.smooth_sensitivity_slider = ctk.CTkSlider(
+            rc, from_=0.0, to=0.5, number_of_steps=500,
+            variable=self.smooth_sensitivity_var, state="disabled")
+        self.smooth_sensitivity_slider.grid(row=6, column=1, columnspan=2, padx=4, pady=(8, 2), sticky="ew")
+        self.smooth_sensitivity_slider.bind("<B1-Motion>", self.update_sensitivity_label)
+        self.smooth_sensitivity_slider.bind("<Button-1>", self.update_sensitivity_label)
 
         # Status bar
         self.status = ctk.CTkLabel(self, text="Ready", anchor="w")
@@ -206,10 +216,14 @@ class App(ctk.CTk):
             self.smooth_strength_slider.configure(state="normal")
             self.smooth_strength_label.configure(text_color=("black", "white"))
             self.blur_check.configure(state="normal")
+            self.smooth_sensitivity_slider.configure(state="normal")
+            self.smooth_sensitivity_label.configure(text_color=("black", "white"))
         else:
             self.smooth_strength_slider.configure(state="disabled")
             self.smooth_strength_label.configure(text_color="gray")
             self.blur_check.configure(state="disabled")
+            self.smooth_sensitivity_slider.configure(state="disabled")
+            self.smooth_sensitivity_label.configure(text_color="gray")
             self._clear_blur_controls()
 
     def update_blur_state(self):
@@ -217,8 +231,6 @@ class App(ctk.CTk):
         if self.blur_var.get():
             self.blur_radius_slider.configure(state="normal")
             self.blur_radius_label.configure(text_color=("black", "white"))
-            self.blur_extra_passes_label.configure(text_color=("black", "white"))
-            self.blur_pass_add_btn.configure(state="normal")
         else:
             self._clear_blur_controls()
 
@@ -236,6 +248,11 @@ class App(ctk.CTk):
         pct = int(self.smooth_strength_var.get() * 100)
         self.smooth_strength_label.configure(text=f"Smooth strength: {pct}%")
         logger.debug(f"Smooth strength updated to: {pct}%")
+
+    def update_sensitivity_label(self, event=None):
+        """Update the region threshold label to show current slider value."""
+        val = self.smooth_sensitivity_var.get()
+        self.smooth_sensitivity_label.configure(text=f"Region threshold: {val:.2f}%")
 
     def update_threshold_label(self, event=None):
         """Update the threshold label to show current slider value."""
@@ -372,14 +389,15 @@ class App(ctk.CTk):
             out = out + "." + fmt.lower()
         smooth_gradients = bool(self.smooth_var.get())
         smooth_strength = float(self.smooth_strength_var.get())
+        smooth_sensitivity = float(self.smooth_sensitivity_var.get())
         blur_passes = None
         if smooth_gradients and self.blur_var.get():
             blur_passes = [int(self.blur_radius_var.get())]
         logger.info(f"Restoring image: {src} -> {out}")
-        logger.info(f"Settings: format={fmt}, smooth={smooth_gradients}, strength={smooth_strength:.2f}, blur_passes={blur_passes}")
+        logger.info(f"Settings: format={fmt}, smooth={smooth_gradients}, strength={smooth_strength:.2f}, sensitivity={smooth_sensitivity:.2f}, blur_passes={blur_passes}")
         self.set_status("Restoring image...")
         try:
-            decompress.decompress_image(src, out, smooth_gradients=smooth_gradients, smooth_strength=smooth_strength, blur_passes=blur_passes)
+            decompress.decompress_image(src, out, smooth_gradients=smooth_gradients, smooth_strength=smooth_strength, blur_passes=blur_passes, smooth_sensitivity=smooth_sensitivity)
             logger.info(f"Successfully restored: {out}")
             self.set_status(f"Restored: {out}")
         except Exception as e:

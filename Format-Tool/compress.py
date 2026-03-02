@@ -16,8 +16,9 @@ import os
 import struct
 import lzma
 import shutil
-import random
 import logging
+
+import numpy as np
 
 from PIL import Image
 
@@ -65,51 +66,74 @@ def kmeans_cluster(pixels, threshold=0):
             indexed.append(unique_colors[color])
         return indexed, palette, 0
 
-    # Determine number of clusters k from threshold
     k = max(2, 256 - (threshold // 2))
 
-    # Unique colors set for efficiency
-    unique_colors_set = set(tuple(pixel[:3]) for pixel in pixels)
-    unique_colors_list = list(unique_colors_set)
+    # Build a (N, 3) uint8 array of all pixels — np.array handles list-of-lists in C
+    arr = np.array(pixels, dtype=np.uint8)
+    if arr.ndim == 2 and arr.shape[1] > 3:
+        arr = arr[:, :3]  # drop alpha if RGBA was passed
 
-    if len(unique_colors_list) <= k:
-        # Already few enough colors, return lossless result
+    # Find unique colors + an index mapping every pixel → its unique-color row.
+    # Viewing each RGB triple as a 3-byte void lets np.unique treat rows atomically.
+    arr_void = np.ascontiguousarray(arr).view(np.dtype((np.void, 3))).ravel()
+    unique_void, pixel_to_unique = np.unique(arr_void, return_inverse=True)
+    n_unique = len(unique_void)
+
+    if n_unique <= k:
+        # Already few enough distinct colors — use lossless palette
         return kmeans_cluster(pixels, threshold=0)
 
-    # Simple K-means: init centers randomly from unique colors, iterate
-    centers = random.sample(unique_colors_list, k)
+    # Unique colors as float32: (n_unique, 3)
+    unique_rgb = unique_void.view(np.uint8).reshape(-1, 3).astype(np.float32)
 
-    for iteration in range(6):  # 6 iterations for convergence
-        # Assign each unique color to nearest center
-        assignments = {}
-        for color in unique_colors_list:
-            nearest = min(range(k), key=lambda i: sum((color[j] - centers[i][j])**2 for j in range(3)))
-            if nearest not in assignments:
-                assignments[nearest] = []
-            assignments[nearest].append(color)
+    # Initialise cluster centers by random sampling from unique colors
+    rng_idx = np.random.choice(n_unique, k, replace=False)
+    centers = unique_rgb[rng_idx].copy()  # (k, 3)
 
-        # Recompute centers
-        new_centers = []
-        for i in range(k):
-            if i in assignments and assignments[i]:
-                avg = [int(sum(c[j] for c in assignments[i]) / len(assignments[i])) for j in range(3)]
-                new_centers.append(avg)
-            else:
-                new_centers.append(centers[i])
+    # Precompute squared norms of unique colors (reused every iteration)
+    sq_unique = np.sum(unique_rgb ** 2, axis=1)  # (n_unique,)
 
-        # Check for convergence
-        if all(sum((n[j] - centers[i][j])**2 for j in range(3))**0.5 < 1 for i, n in enumerate(new_centers)):
+    # Chunk size for distance computation: 64k rows × 256 clusters × 4 bytes ≈ 64 MB peak
+    CHUNK = 65536
+
+    for _ in range(6):
+        sq_centers = np.sum(centers ** 2, axis=1)  # (k,)
+
+        # Assign each unique color to its nearest center via ||a-b||² = ||a||² + ||b||² - 2a·b
+        unique_labels = np.empty(n_unique, dtype=np.int32)
+        for start in range(0, n_unique, CHUNK):
+            end = min(start + CHUNK, n_unique)
+            chunk = unique_rgb[start:end]                   # (B, 3)
+            dot = chunk @ centers.T                         # (B, k)
+            sq_dist = (
+                sq_unique[start:end, np.newaxis]            # (B, 1)
+                + sq_centers[np.newaxis, :]                 # (1, k)
+                - 2 * dot                                   # (B, k)
+            )
+            unique_labels[start:end] = np.argmin(sq_dist, axis=1)
+
+        # Recompute centers as the mean of all unique colors assigned to each cluster
+        new_centers = centers.copy()
+        counts = np.bincount(unique_labels, minlength=k)
+        for ch in range(3):
+            ch_sums = np.bincount(
+                unique_labels,
+                weights=unique_rgb[:, ch].astype(np.float64),
+                minlength=k,
+            )
+            mask = counts > 0
+            new_centers[mask, ch] = (ch_sums[mask] / counts[mask]).astype(np.float32)
+
+        # Stop early if all centers moved less than 1 unit
+        if np.all(np.sum((new_centers - centers) ** 2, axis=1) < 1.0):
             break
         centers = new_centers
 
-    palette = [[int(c[j]) for j in range(3)] for c in centers]
+    palette = [[max(0, min(255, int(round(float(c))))) for c in color] for color in centers]
 
-    # map every pixel to nearest palette entry
-    indexed = []
-    for pixel in pixels:
-        color = tuple(pixel[:3])
-        nearest = min(range(len(palette)), key=lambda i: sum((color[j] - palette[i][j])**2 for j in range(3)))
-        indexed.append(nearest)
+    # Map every pixel to its cluster in one vectorised index operation — no Python loop
+    pixel_labels = unique_labels[pixel_to_unique]  # (N,)
+    indexed = pixel_labels.tolist()
 
     return indexed, palette, threshold
 
