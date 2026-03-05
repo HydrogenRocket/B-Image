@@ -171,14 +171,13 @@ class BImageViewer(ctk.CTk):
                     else:
                         return None
                 except Exception: pass
+        # macOS AppleScript — no 'of type' filter: AppleScript expects UTIs or
+        # 4-char HFS codes, not bare extensions, so passing "bimg"/"png" greys
+        # out every file instead of filtering to them.
         if sys.platform == "darwin":
             native_available = True
             try:
-                if exts:
-                    ext_list = ", ".join(f'"{e}"' for e in exts)
-                    script = f'POSIX path of (choose file with prompt "{title}" of type {{{ext_list}}})'
-                else:
-                    script = f'POSIX path of (choose file with prompt "{title}")'
+                script = f'POSIX path of (choose file with prompt "{title}")'
                 res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
                 if res.returncode == 0:
                     return res.stdout.strip()
